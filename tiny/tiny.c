@@ -77,21 +77,30 @@ void doit(int fd)
         return;
     }
 
-    printf("ORIGIN REQUEST----------\n%s", rio.rio_buf);
     sprintf(request, "%s %s HTTP/1.0\r\n", method, path);
 
     // generate a http request
     generate_request(&rio, request);
 
     if (!strstr(request, "Host: ")) {
-        sprintf(request, "Host: %s\r\n", hostname);
+        sprintf(request, "%sHost: %s\r\n", request, hostname);
     }
     sprintf(request, "%s\r\n", request);
 
-    printf("----HERE IS THE REQUEST-------\n\n%s", request);
+    printf("%s", request);
+
     /* Write to server*/
     clientfd = Open_clientfd(hostname, atoi(port));
-    Rio_writen(clientfd, request, sizeof(request));
+    Rio_writen(clientfd, request, strlen(request));
+
+    /* Send response back */
+    Rio_readinitb(&rio, clientfd);
+
+    while (rio_readlineb(&rio, buf, MAXLINE) > 0) {
+        Rio_writen(fd, buf, strlen(buf));
+    }
+    Rio_writen(fd, rio.rio_buf, strlen(rio.rio_buf));
+
 }
 /* $end doit */
 
@@ -133,7 +142,7 @@ void parse_uri(char *uri, char *hostname, char *port, char *path)
         hostp = Gethostbyname(temp);
     }
     if (hostp != NULL) {
-        hostname = hostp->h_name;
+        strcpy(hostname, hostp->h_name);
     }
     else {
         hostname = NULL;
@@ -175,10 +184,9 @@ void generate_request(rio_t *rp, char *request)
     char buf[MAXLINE];
 
     Rio_readlineb(rp, buf, MAXLINE);
-
     while(strcmp(buf, "\r\n")) {
-    	Rio_readlineb(rp, buf, MAXLINE);
         build_header(buf, request);
+    	Rio_readlineb(rp, buf, MAXLINE);
     }
     if (!strstr(request, "User-Agent")) {
         sprintf(request, "%s%s", request, user_agent_hdr);
@@ -204,18 +212,18 @@ void build_header(char *buf, char *request)
         sprintf(request, "%s%s", request, buf);
     }
     else if (strstr(buf, "User-Agent: ")) {
-        return;
+        sprintf(request, "%s%s", request, user_agent_hdr);
+    }  
+    else if (strstr(buf, "Accept-Encoding: ")) {
+        sprintf(request, "%s%s", request, accept_encoding_hdr);
     }
     else if (strstr(buf, "Accept: ")) {
-        return;
+        sprintf(request, "%s%s", request, accept_hdr);
     }
-    else if (strstr(buf, "Accept-Encoding: ")) {
+    else if (strstr(buf, "Proxy-Connection: ")) {
         return;
     }
     else if (strstr(buf, "Connection: ")) {
-        return;
-    }
-    else if (strstr(buf, "Proxy-Connection: ")) {
         return;
     }
     else {
