@@ -81,6 +81,7 @@ void doit(int fd)
     char request[MAXLINE], hostname[MAXLINE], port[MAXLINE], path[MAXLINE];
     rio_t rio;
     int clientfd;
+    size_t n;
   
     /* Read request line and headers */
     Rio_readinitb(&rio, fd);
@@ -127,15 +128,15 @@ void doit(int fd)
     Rio_writen(clientfd, request, strlen(request));
 
     /* Send response back */
-    //Rio_readinitb(&rio, clientfd);
+    Rio_readinitb(&rio, clientfd);
     /*
     sigset_t mask, oldmask;
     Sigemptyset(&mask);
     Sigaddset(&mask, SIGPIPE);
     Sigprocmask(SIG_BLOCK, &mask, &oldmask);
     */
-    while (Rio_readn(clientfd, buf, MAXLINE) != 0) {
-        Rio_writen(fd, buf, MAXLINE);
+    while ((n = Rio_readlineb(&rio, buf, MAXLINE)) != 0) {
+        Rio_writen(fd, buf, n);
     }
     //Rio_writen(fd, rio.rio_buf, MAXLINE);
     //Sigprocmask(SIG_SETMASK, &oldmask, NULL);
