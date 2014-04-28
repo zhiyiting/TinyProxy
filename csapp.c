@@ -536,7 +536,7 @@ ssize_t rio_readn(int fd, void *usrbuf, size_t n)
 
     while (nleft > 0) {
 	if ((nread = read(fd, bufp, nleft)) < 0) {
-	    if (errno == EINTR) /* interrupted by sig handler return */
+	    if (errno == EINTR || errno == ECONNRESET) /* interrupted by sig handler return */
 		nread = 0;      /* and call read() again */
 	    else
 		return -1;      /* errno set by read() */ 
@@ -562,7 +562,7 @@ ssize_t rio_writen(int fd, void *usrbuf, size_t n)
 
     while (nleft > 0) {
 	if ((nwritten = write(fd, bufp, nleft)) <= 0) {
-	    if (errno == EINTR)  /* interrupted by sig handler return */
+	    if (errno == EINTR || errno == EPIPE)  /* interrupted by sig handler return */
 		nwritten = 0;    /* and call write() again */
 	    else
 		return -1;       /* errorno set by write() */
@@ -592,7 +592,7 @@ static ssize_t rio_read(rio_t *rp, char *usrbuf, size_t n)
 	rp->rio_cnt = read(rp->rio_fd, rp->rio_buf, 
 			   sizeof(rp->rio_buf));
 	if (rp->rio_cnt < 0) {
-	    if (errno != EINTR) /* interrupted by sig handler return */
+	    if (errno != EINTR || errno != ECONNRESET) /* interrupted by sig handler return */
 		return -1;
 	}
 	else if (rp->rio_cnt == 0)  /* EOF */
@@ -636,7 +636,7 @@ ssize_t rio_readnb(rio_t *rp, void *usrbuf, size_t n)
     
     while (nleft > 0) {
 	if ((nread = rio_read(rp, bufp, nleft)) < 0) {
-	    if (errno == EINTR) /* interrupted by sig handler return */
+	    if (errno == EINTR || errno == ECONNRESET) /* interrupted by sig handler return */
 		nread = 0;      /* call read() again */
 	    else
 		return -1;      /* errno set by read() */ 
