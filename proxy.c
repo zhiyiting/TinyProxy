@@ -1,16 +1,18 @@
 /*
  * proxy.c - A simple, concurrent HTTP/1.0 Web proxy that caches recently
  * 		accessed web content.
+ * 
+ * Implementing Posix threads with Semaphores using first readers-writers 
+ * problem idea, which favors readers over writers. Implement a simple LRU
+ * policy, update the cache order only before the last write lock to prevent
+ * race conditions.
+ * 
  *
  * Name: Yiting Zhi
  * yzhi@andrew.cmu.edu
  *
  */
-#include "csapp.h"
-
-/* Recommended max cache and object sizes */
-#define MAX_CACHE_SIZE 1049000
-#define MAX_OBJECT_SIZE 102400
+#include "cache.h"
 
 /* Request helper headers*/
 static const char *user_agent_hdr = "User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:10.0.3) Gecko/20120305 Firefox/10.0.3\r\n";
@@ -24,11 +26,6 @@ void *thread(void *vargp);
 void generate_request(rio_t *rp, char *request);
 void parse_uri(char *uri, char *hostname, char *port, char *path);
 void build_header(char *buf, char *request);
-void serve_content(int fd, char *path);
-int parse_path(char *path, char *filename, char *cgiargs);
-void serve_static(int fd, char *filename, int filesize);
-void get_filetype(char *filename, char *filetype);
-void serve_dynamic(int fd, char *filename, char *cgiargs);
 void clienterror(int fd, char *cause, char *errnum, char *shortmsg, char *longmsg);
 
 int main(int argc, char **argv)
@@ -38,7 +35,6 @@ int main(int argc, char **argv)
 	struct sockaddr_in clientaddr;
 	pthread_t tid;
 
-
 	/* Check command line args */
 	if (argc != 2) {
 		fprintf(stderr, "usage: %s <port>\n", argv[0]);
@@ -46,15 +42,18 @@ int main(int argc, char **argv)
 	}
 	port = atoi(argv[1]);
 
+	/* Handle sigpipe error */
 	Signal(SIGPIPE, SIG_IGN);
 
+	/* Initialize cache header, cache size, reader/writer mutex */
+	cache_init();
+
+	/* Open a socket listener */
 	listenfd = Open_listenfd(port);
 	while (1) {
-		connfdp = Malloc(sizeof(int));
+		connfdp = (int *) Malloc(sizeof(int));
 		*connfdp = Accept(listenfd, (SA *)&clientaddr, &clientlen);
 		Pthread_create(&tid, NULL, thread, connfdp);
-		//doit(connfd);
-		//Close(connfd);
 	}
     return 0;
 }
@@ -79,67 +78,86 @@ void doit(int fd)
 {
 	char buf[MAXLINE], method[MAXLINE], uri[MAXLINE], version[MAXLINE];
     char request[MAXLINE], hostname[MAXLINE], port[MAXLINE], path[MAXLINE];
+    unsigned char response[MAX_OBJECT_SIZE];
     rio_t rio;
+    cache_t *cache;
     int clientfd;
-    size_t n;
+    size_t n, filesize;
   
     /* Read request line and headers */
     Rio_readinitb(&rio, fd);
     Rio_readlineb(&rio, buf, MAXLINE);
 
+    /* Read the first line to get method, uri and version */
     sscanf(buf, "%s %s %s", method, uri, version);
 
+    /* Handle error when method is not GET */
     if (strcasecmp(method, "GET")) { 
        clienterror(fd, method, "501", "Not Implemented",
                 "Tiny does not implement this method");
         return;
     }
 
+    /* Find the uri to see if it is in the cache */
+    if ((cache = cache_find(uri)) != NULL) {
+    	Rio_writen(fd, cache->content, cache->size);
+    	return;
+    }
+
+    /* Parse uri to get hostname, port and path */
     parse_uri(uri, hostname, port, path);
 
-
+    /* If hostname doesn't exist throw error */
     if (hostname == NULL) {
         clienterror(fd, "hostname", "400", "Bad Request",
             "The request cannot be fulfilled due to bad syntax");
         return;
     }
 
-
-    if (!strcmp(hostname, "localhost")) {
-    	serve_content(fd, path);
-    	return;
-    }
-
+    /* put method and path to the request */
     sprintf(request, "%s %s HTTP/1.0\r\n", method, path);
 
-    // generate a http request
+    /* generate a http request */
     generate_request(&rio, request);
 
+    /* Attach host to browser */
     if (!strstr(request, "Host: ")) {
         sprintf(request, "%sHost: %s\r\n", request, hostname);
     }
+
+    /* Put and ending to the request */
     sprintf(request, "%s\r\n", request);
 
-    // debugging line //
-    printf("%s", request);
-
     /* Write to server*/
-    clientfd = Open_clientfd_r(hostname, atoi(port));
+    clientfd = open_clientfd_r(hostname, atoi(port));
+    if (clientfd == -1) {
+    	clienterror(fd, hostname, "500", "Internal Server Error",
+    		"The server you requested cannot respond at this time");
+    	return;
+    }
     Rio_writen(clientfd, request, strlen(request));
 
     /* Send response back */
     Rio_readinitb(&rio, clientfd);
-    /*
-    sigset_t mask, oldmask;
-    Sigemptyset(&mask);
-    Sigaddset(&mask, SIGPIPE);
-    Sigprocmask(SIG_BLOCK, &mask, &oldmask);
-    */
+
+    filesize = 0;
+    /* Read the input line by line and count the filezie */
     while ((n = Rio_readlineb(&rio, buf, MAXLINE)) != 0) {
-        Rio_writen(fd, buf, n);
+        Rio_writen(fd, buf, n);       
+        if (filesize + n <= MAX_OBJECT_SIZE) {
+        	size_t i;
+        	for (i = 0; i < n; i++) {
+        		response[i + filesize] = buf[i];
+        	}
+        }
+        filesize += n;
     }
-    //Rio_writen(fd, rio.rio_buf, MAXLINE);
-    //Sigprocmask(SIG_SETMASK, &oldmask, NULL);
+
+    /* If size doesn't exceed max size, cache it to the memory */
+    if (filesize <= MAX_OBJECT_SIZE) {
+    	cache_store(filesize, uri, response);
+    } 
+
     Close(clientfd);
 }
 
@@ -148,12 +166,11 @@ void doit(int fd)
  */
 void parse_uri(char *uri, char *hostname, char *port, char *path)
 {
-	struct in_addr addr;
-    struct hostent *hostp;
     char *ptr = uri;
     char temp[MAXLINE];
     int i;
 
+    /* Check if the header contains 'http' */
     if (strlen(uri) > 7) {
 	    for (i = 0; i < 7; i++) {
 	        temp[i] = uri[i];
@@ -163,10 +180,12 @@ void parse_uri(char *uri, char *hostname, char *port, char *path)
 	        ptr = uri;
 	    }
 	    else {
+	    	/* Start from the non-http part */
 	        ptr = uri + 7;
 	    }
 	}
     i = 0;
+    /* Copy the hostname to the variable */
     strcpy(temp, "");
     while (*ptr != '\0' && *ptr != ':' && *ptr != '/') {
         temp[i] = *ptr;
@@ -175,30 +194,15 @@ void parse_uri(char *uri, char *hostname, char *port, char *path)
     }
     temp[i] = '\0';
 
-    // if other location, just print
-    // if itself, serve content
-    if (strcmp(temp, "")) {
-    	if (inet_aton(temp, &addr) != 0) {
-        hostp = Gethostbyaddr((const char *)&addr, sizeof(addr), AF_INET);
-	    }
-	    else {
-	        hostp = Gethostbyname(temp);
-	    }
-	    if (hostp != NULL) {
-	        strcpy(hostname, hostp->h_name);
-	    }
-	    else {
-	        hostname = NULL;
-	        return;
-	    }
-    }
-    else {
-    	strcpy(hostname, "localhost");
-    }
+    // Get hostname
+    strcpy(hostname, temp);
+
+    /* If the address ends just with hostname, default path is index.h */
     if (*ptr == '\0') {
         strcpy(port, "80");
         strcpy(path, "/index.html");
     }
+    /* If the address has a path */
     else if (*ptr == '/') {
         strcpy(port, "80");
         strcpy(path, ptr);
@@ -276,131 +280,6 @@ void build_header(char *buf, char *request)
     }
 }
 
-/* 
- * serve_content - act like a host to serve contents
- */
-void serve_content(int fd, char *path)
-{
-	int is_static;
-	struct stat sbuf;
-	char filename[MAXLINE], cgiargs[MAXLINE];
-	is_static = parse_path(path, filename, cgiargs);
-	if (stat(filename, &sbuf) < 0) {
-		clienterror(fd, filename, "404", "Not found", "Cannot find this file");
-		return;
-	}
-
-	if (is_static) {
-		if (!(S_ISREG(sbuf.st_mode)) || !(S_IRUSR & sbuf.st_mode)) {
-			clienterror(fd, filename, "403", "Forbidden", "Cannot read file");
-			return;
-		}
-		serve_static(fd, filename, sbuf.st_size);
-	}
-	else {
-		if (!(S_ISREG(sbuf.st_mode)) || !(S_IXUSR & sbuf.st_mode)) {
-			clienterror(fd, filename, "403", "Forbidden", "Cannot read file");
-			return;
-		}
-		serve_dynamic(fd, filename, cgiargs);
-	}
-}
-
-/*
- * parse_path - parse Path into filename and CGI args
- *				return 0 if dynamic content, 1 if static
- */
-int parse_path(char *path, char *filename, char *cgiargs)
-{
-	char *ptr;
-
-	if (!strstr(path, "cgi-bin")) {
-		strcpy(cgiargs, "");
-		strcpy(filename, ".");
-		strcat(filename, path);
-		return 1;
-	}
-	else {
-		ptr = index(path, '?');
-		if (ptr) {
-			strcpy(cgiargs, ptr+1);
-			*ptr = '\0';
-		}
-		else {
-			strcpy(cgiargs, "");
-		}
-		strcpy(filename, ".");
-		strcat(filename, path);
-		return 0;
-	}
-}
-
-/*
- * serve_static - copy a file back to the client
- */
-void serve_static(int fd, char *filename, int filesize)
-{
-	int srcfd;
-	char *srcp, filetype[MAXLINE], buf[MAXBUF];
-
-	/* Send response headers to client */
-	get_filetype(filename, filetype);
-	sprintf(buf, "HTTP/1.0 200 OK\r\n");
-	sprintf(buf, "%sServer: Proxylab Server\r\n", buf);
-	sprintf(buf, "%sContent-length: %d\r\n", buf, filesize);
-	sprintf(buf, "%sContent-type: %s\r\n\r\n", buf, filetype);
-	Rio_writen(fd, buf, strlen(buf));
-
-	/* Send response body to client */
-	srcfd = Open(filename, O_RDONLY, 0);
-	srcp = Mmap(0, filesize, PROT_READ, MAP_PRIVATE, srcfd, 0);
-	Close(srcfd);
-	Rio_writen(fd, srcp, filesize);
-	Munmap(srcp, filesize);
-}
-
-/*
- * get_filetype - derive file type from file name
- */
-void get_filetype(char *filename, char *filetype)
-{
-	if (strstr(filename, ".html")) {
-		strcpy(filetype, "text/html");
-	}
-	else if (strstr(filename, ".gif")) {
-		strcpy(filetype, "image/gif");
-	}
-	else if (strstr(filename, ".jpg")) {
-		strcpy(filetype, "image/jpeg");
-	}
-	else {
-		strcpy(filetype, "text/plain");
-	}
-}
-
-/*
- * serve_dynamic - run a CGI program on behalf of the client
- */
-void serve_dynamic(int fd, char *filename, char *cgiargs)
-{
-	char buf[MAXLINE], *emptylist[] = { NULL };
-
-    /* Return first part of HTTP response */
-    sprintf(buf, "HTTP/1.0 200 OK\r\n");
-    Rio_writen(fd, buf, strlen(buf));
-    sprintf(buf, "Server: Tiny Web Server\r\n");
-    Rio_writen(fd, buf, strlen(buf));
-  
-    if (Fork() == 0) { /* child */
-		/* Real server would set all CGI vars here */
-		setenv("QUERY_STRING", cgiargs, 1); 
-		Dup2(fd, STDOUT_FILENO);         /* Redirect stdout to client */
-		Execve(filename, emptylist, environ); /* Run CGI program */
-    }
-    Wait(NULL); /* Parent waits for and reaps child */
-}
-
-
 /*
  * clienterror - returns an error message to the client
  */
@@ -413,7 +292,7 @@ void clienterror(int fd, char *cause, char *errnum, char *shortmsg, char *longms
     sprintf(body, "%s<body bgcolor=""ffffff"">\r\n", body);
     sprintf(body, "%s%s: %s\r\n", body, errnum, shortmsg);
     sprintf(body, "%s<p>%s: %s\r\n", body, longmsg, cause);
-    sprintf(body, "%s<hr><em>The Tiny Web server</em>\r\n", body);
+    sprintf(body, "%s<hr><em>Yiting's Web Proxy</em>\r\n", body);
 
     /* Print the HTTP response */
     sprintf(buf, "HTTP/1.0 %s %s\r\n", errnum, shortmsg);

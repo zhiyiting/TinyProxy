@@ -435,9 +435,11 @@ void Connect(int sockfd, struct sockaddr *serv_addr, int addrlen)
 struct hostent *Gethostbyname(const char *name) 
 {
     struct hostent *p;
-
-    if ((p = gethostbyname(name)) == NULL)
-	dns_error("Gethostbyname error");
+    /* Modified to prevent proxy from terminating */
+    if ((p = gethostbyname(name)) == NULL) {
+        return NULL;
+    }
+	//dns_error("Gethostbyname error");
     return p;
 }
 /* $end gethostbyname */
@@ -445,9 +447,11 @@ struct hostent *Gethostbyname(const char *name)
 struct hostent *Gethostbyaddr(const char *addr, int len, int type) 
 {
     struct hostent *p;
-
-    if ((p = gethostbyaddr(addr, len, type)) == NULL)
-	dns_error("Gethostbyaddr error");
+    /* Modified to prevent proxy from terminating */
+    if ((p = gethostbyaddr(addr, len, type)) == NULL) {
+        return NULL;
+    }
+	
     return p;
 }
 
